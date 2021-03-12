@@ -1,0 +1,173 @@
+---
+title: "Model CAPM"
+author: "Mikołaj Brzozowski"
+date: "30 11 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<style>
+body {
+text-align: justify}
+</style>
+
+## Cel projektu
+Celem projektu jest analiza giełby polskiej za pomocą modelu CAPM. CAPM jest miarą relacji między oczekiwanym zwrotem a ryzykiem inwestycji w papiery wartościowe. Model ten służy do analizy papierów wartościowych i ich wyceny z uwzględnieniem oczekiwanej stopy zwrotu i kosztu zaangażowanego kapitału.
+
+$$R_{it} - r_{ft} = \alpha_{i} + \beta_{i}(R_{Mt} - r_{ft}) + \varepsilon_{it}$$
+
+$R_{it}$ - stopa zwrotu i-tego portfela w czasie t    
+$r_{ft}$ - stopa zwrotu wolna od ryzyka    
+$R_{Mt}$ - stopa zwrotu portfela rynkowego    
+$\alpha_{i}$, $\beta_{i}$ - parametry strukturalne modelu    
+$\varepsilon_{it}$ - zakłócenia losowe   
+
+## Dane
+Dane zostały pobrane z serwisu finansowego [Stooq](https://stooq.pl/) od stycznia 2010 do grudnia 2020. Poza notowaniami [WIG](https://stooq.pl/q/?s=wig) wykorzystano 10 indeksów branżowych:   
+1. WIG-Banki ([WIG_BANKI](https://stooq.pl/q/?s=wig_banki))   
+2. WIG-Budownictwo ([WIG_BUDOW](https://stooq.pl/q/?s=wig_budow))   
+3. WIG-Chemia ([WIG_CHEMIA](https://stooq.pl/q/?s=wig_chemia))   
+4. WIG-Energia ([WIG_ENERG](https://stooq.pl/q/?s=wig_energ))   
+5. WIG-Informatyka ([WIG_INFO](https://stooq.pl/q/?s=wig_info))   
+6. WIG-Media ([WIG_MEDIA](https://stooq.pl/q/?s=wig_media))    
+7. WIG-Nieruchomości ([WIG_NRCHOM](https://stooq.pl/q/?s=wig_nrchom))   
+8. WIG-Paliwa ([WIG_PALIWA](https://stooq.pl/q/?s=wig_paliwa))    
+9. WIG-Spożywczy ([WIG_SPOZYW](https://stooq.pl/q/?s=wig_spozyw))    
+10. WIG-Telekomunikacja ([WIG_TELKOM](https://stooq.pl/q/?s=wig_telkom))    
+
+## Import danych
+W celu zaimportowania danych do R wykorzystano funkcję read_xlsx() z biblioteki "readxl" i zapisano je pod postacią ramki danych.
+
+```{r, message=FALSE, warning=FALSE}
+library(readxl)
+data<-as.data.frame(read_xlsx('C://Users//FUJITSU//Desktop//Studia//IiE 1 MGR - Analiza wielowymiarowa//Proj1//Data.xlsx'))
+```
+
+```{r,echo = FALSE, warning=FALSE}
+library(knitr)
+library(magrittr)
+library(kableExtra)
+kable(data ,caption = "Pobrane dane")%>% kable_styling("striped") %>% scroll_box(width="100%",height="500px")
+```
+
+## Budowa modelu
+### Wyznaczenie przydatnych wielkości
+Wyznaczono liczbę obserwacji "T", liczbę portfeli "N", liczbę czynników "K" i wysokość stopy wolnej od ryzyka "risk_free".
+
+```{r}
+T<-length(data[,1])
+N<-length(data[1,])-2
+K<-1
+risk_free<-0.03/12
+```
+
+### Logarytmiczne stopy zwrotu
+W celu zmniejszenia wrażliwości danych na wahania i redukcję wypływu wartości odstających zastosowano logarytmiczną stopę zwrotu, którą oblicza się w sposób następujący:
+$$R_{t} = ln(\frac{P_t}{P_{t-1}})$$
+
+$R_{t}$ - logarytmiczna stopa zwrotu  
+$P_{t}$ - wartość zamknięcia notowania w czasie t  
+$P_{t-1}$ - wartość zamknięcia notowania w czasie t-1  
+
+Wartość logarytmicznej stopy zwrotu została następnie pomniejszona o wysokość stopy wolnej od ryzyka.
+```{r}
+rate_of_return<-as.data.frame(matrix(NA, length(data[,1]), length(data[1,])))
+rate_of_return[,1]<-data[,1]
+
+for (i in 2:(N+2)){
+  for (j in 2:T)
+    rate_of_return[j,i]<-log(data[j,i]/data[j-1,i])-risk_free
+}
+```
+
+Usunięty został pierwszy wiersz danych zawierający watości NA dla miesiąca stycznia 2010 spowodowane brakiem możliwości wyliczenia logarytmicznej stopy zwrotu związane z brakiem danych poprzedzających notowanie (grudzień 2009).
+
+```{r}
+rate_of_return<-na.omit(rate_of_return)
+```
+
+
+```{r,echo=FALSE}
+kable(rate_of_return, col.names = c("Data", "RoR_WIG","RoR_BANKI", "RoR_BUDOW", "RoR_CHEMIA", "RoR_ENERG", "RoR_INFO", "RoR_MEDIA", "RoR_NRCHOM", "RoR_PALIWA", "RoR_SPOZYW", "RoR_TELKOM" ) ,caption = "Logarytmiczne stopy zwrotu pomniejszone o stopę wolną od ryzyka")%>% kable_styling("striped", "hover") %>% scroll_box(width="100%",height="500px")
+```
+
+### Modele regresji liniowej
+Zbudowano N (10) modeli regresji liniowej, gdzie stopy zwrotu indeksów branżowych są wyjaśniane przez stopy zwrotu indeksu gółwnego WIG.
+Ze względu na to, iż każdy z modeli ma tę samą zmienną objaśniającą, do estymacji parametrów można wykorzystać Metodę Najmniejszych Kwadratów. Z modeli zostały zapisane wartości reszt "residuals" i alf "alpha".
+
+```{r}
+residuals<-matrix(NA,T-1,N)
+alpha<-matrix(NA, N, 2)
+
+for (i in 1:N){
+  residuals[,i]<-resid(lm(rate_of_return[,i+2]~rate_of_return[,2]))
+  alpha[i,1]<-coef(lm(rate_of_return[,i+2]~rate_of_return[,2]))[1]
+  alpha[i,2]<-summary(lm(rate_of_return[,i+2]~rate_of_return[,2]))$coefficient[1,4]
+}
+```
+
+```{r,echo=FALSE}
+kable(residuals, col.names = c("RES_BANKI", "RES_BUDOW", "RES_CHEMIA", "RES_ENERG", "RES_INFO", "RES_MEDIA", "RES_NRCHOM", "RES_PALIWA", "RES_SPOZYW", "RES_TELKOM") ,caption = "Reszty")%>% kable_styling("striped","hover") %>% scroll_box(width="100%",height="500px")
+
+kable(cbind(c("RoR_BANKI~RoR_WIG","RoR_BUDOW~RoR_WIG","RoR_CHEMIA~RoR_WIG","RoR_ENERG~RoR_WIG","RoR_INFO~RoR_WIG","RoR_MEDIA~RoR_WIG","RoR_NRCHOM~RoR_WIG","RoR_PALIWA~RoR_WIG","RoR_SPOZYW~RoR_WIG","RoR_TELKOM~RoR_WIG"),alpha), col.names= c("Model","Współczynnik Alfa", "p.value Alfa"),caption = "Współczynniki Alfa")%>% kable_styling("striped","hover")
+
+```
+
+## Macierz sigma
+Macierz sigma ($\Sigma$) jest macierzą wariancji-kowariancji reszt "residuals". Wykorzystano do tego funkcję cov() a następnie została ona odwrócona.
+```{r}
+inverse_sigma<-as.matrix(solve(cov(residuals)))
+```
+
+```{r, echo=FALSE}
+
+kable(cbind(c("RES_BANKI", "RES_BUDOW", "RES_CHEMIA", "RES_ENERG", "RES_INFO", "RES_MEDIA", "RES_NRCHOM", "RES_PALIWA", "RES_SPOZYW", "RES_TELKOM"),inverse_sigma),col.names = c("","RES_BANKI", "RES_BUDOW", "RES_CHEMIA", "RES_ENERG", "RES_INFO", "RES_MEDIA", "RES_NRCHOM", "RES_PALIWA", "RES_SPOZYW", "RES_TELKOM") ,caption = "Wartości odwróconej macierzy sigma")%>% kable_styling("striped","hover") %>% scroll_box(width="100%")
+```
+
+## GRS
+W celu sprawdzenia, czy wyrazy wolne są łącznie równe zero, należy przeprowadzić test o następujących hipotezach badawczych:
+$$H_0:\alpha=0$$
+$$H_1:\alpha\neq0$$
+W tym celu obliczona zostaje statystyka GRS (), według poniższego wzoru:
+$$GRS=(\frac{T}{N})(\frac{T-N-K}{T-K-1})[\frac{\hat\alpha^{T}\Sigma^{-1}\hat\alpha}{1+\hat\mu^{T}\hat V^{-1}\hat\mu}]$$
+$T$ - liczba obserwacji
+$N$ - liczba portfeli
+$K$ - liczba czynników objaśniających
+$\hat\alpha$ - wektor wyrazów wolnych
+$\hat\Sigma$ - macierz wariancji-kowariancji składników losowych
+$\hat V$ - wariancja WIG
+
+```{r}
+GRS<-T/N*(T-N-K)/(T-K-1)*(t(alpha[,1])%*%inverse_sigma%*%alpha[,1])/(1+mean(rate_of_return[,2])^2*var(rate_of_return[,2])^-1)
+GRS
+```
+
+## Wnioski końcowe i wizualizacja
+Wyniki końcowe - porównanie GRS z wysokości statystyki F oraz przyjętego poziomu alfy z wyznaczoną wielkością alfy dla GRS równego statystyce F.
+```{r, echo=FALSE}
+alpha_0.95<-0.95
+F_0.95<-qf(0.95,N,T-N-K)
+GRS_eqF_alpha<-pf(GRS, N, T-N-K)
+results<-data.frame(GRS, F_0.95,alpha_0.95, GRS_eqF_alpha)
+results
+```
+
+Wizualizacja wyników
+```{r fig.align='center', echo=FALSE, results=FALSE}
+alphas<-seq(0,1,0.01)
+qf<-matrix(NA, 101, 1)
+
+for (i in 1:101) {
+  qf[i]<-qf(alphas[i],N,T-N-K)  
+}
+
+visualization<-data.frame(alphas,qf,GRS)
+plot(visualization[,1],visualization[,2], type="l", col="red", xlab = "Poziom alfa", ylab = "GRS/Statystyka F")+lines(visualization[,1],visualization[,3],col="blue")+lines(rep(0.95,101),visualization[,2],col="green")+lines(rep(GRS_eqF_alpha,101),visualization[,2], col="orange")
+
+legend("topleft",legend = c("GRS", "Statystyka F", "Współczynnik ufności alfa = 0.95", "Współczynnik ufności alfa dla GRS=F"), col=c("red", "blue", "green", "orange"), lty = 1, bg="#FFFFCC")
+
+```
+
+Z powyższego porównania GRS z statystyką F wynika brak podstaw do odrzucenia hipotezy zerowej dotyczącej łącznej wartości współczynników $\alpha$ równej 0. W przypadku, gdyby poziom ufności ustalony został poniżej wielkości GRS_eqF_alpha wnioski zostałyby sformułowane przeciwnie.
