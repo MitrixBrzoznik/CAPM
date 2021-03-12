@@ -1,0 +1,233 @@
+---
+title: "Model VAR"
+author: "Mikołaj Brzozowski"
+date: "16 01 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r libraries, echo=FALSE, message=FALSE}
+library(kableExtra)
+library(zoo)
+library(readxl)
+library(tidyverse)
+library(tseries)
+library(vars)
+```
+
+## Cel projektu
+Celem projektu jest zbadanie zależności zachodzących pomiędzy wybranymi rynkami wykorzystując modele VAR oraz definicję przyczynowości w sensie Grangera.
+
+### Model VAR
+Model wektorowej autoregresji jest uogólnieniem modeli AR na przypadek wielu szeregów czasowych. To model wielorównaniowy opierający się na następujących zasadach: 
+
+* Nie istnieje priori żadne rozróżnienie między zmiennymi endogenicznymi a egzogenicznymi.
+* Nie istnieją żadne uzależnione ograniczenia co do wielkości parametrów modelu.
+
+### Definicja przyczynowości w sensie Grangera
+*$X_t$ jest przyczyną $Y_t$ w sensie Grangera, jeżeli bieżące wartości $Y_t$ można prognozować z większą dokładnością przy użyciu przeszłych wartości $X_t$, niż bez ich wykorzystania, przy niezmienionej pozostałej informacji.
+*
+
+## Dane
+### Obróbka danych
+Dane zostały pobrane z serwisu finansowego [Stooq](https://stooq.pl/) od stycznia 2010 do grudnia 2020. Analiza przeprowadzona została na podstawie pięciu następujących indeksów światowych:  
+1. [WIG20](https://stooq.pl/q/d/?s=wig20) – indeks giełdowy 20 największych spółek akcyjnych notowanych na warszawskiej Giełdzie Papierów Wartościowych.  
+2. [DAX](https://stooq.pl/q/d/?s=^dax) - indeks giedowy 30 największych spółek akcyjnych notowanych na Giełdzie Niemieckiej.  
+3. [SMI](https://stooq.pl/q/d/?s=^smi) - indeks giełdowy 20 spółek notowanych na Szwajcarskiej Giełdzie Papierów Wartościowych.  
+4. [UK100](https://stooq.pl/q/d/?s=^ftm) - indeks 100 największych akcji spółek giełdowych notowanych na Giełdzie Papierów Wartościowych w Londynie.  
+5. [SSE Composite](https://stooq.pl/q/d/?s=^shc) - indeks giełdowy obejmujący wszystkie spółki notowane na Giełdzie Papierów Wartościowych w Szanghaju.
+
+```{r, echo=FALSE, warning=FALSE}
+setwd("C:/Users/FUJITSU/Desktop/Dokumenty/Studia/IiE 1 MGR - Analiza wielowymiarowa/Proj2")
+data_files<-list.files("C:/Users/FUJITSU/Desktop/Dokumenty/Studia/IiE 1 MGR - Analiza wielowymiarowa/Proj2", pattern = "*.csv")
+data<-sapply(data_files, read.csv, simplify = FALSE)
+data<-lapply(data, function(x) x[names(x)%in%c("Data","Zamkniecie")])
+dataset<-data.frame(data$wig20_d.csv)
+colnames(dataset)<-c("Data", "WIG")
+
+for (i in 1:length(data_files)) {
+  if(data_files[i]!="wig20_d.csv")
+    dataset<-merge(dataset, data[[i]], by="Data", all = TRUE)
+}
+
+colnames(dataset)<-c("Data", "WIG20", "DAX", "SPX", "AUT", "FTSE")
+
+dataset<-dataset[order(as.Date(dataset$Data)),]
+dataset<-dataset[-c(2842),]
+
+kable(dataset ,caption = "Pobrane dane")%>% kable_styling("striped") %>% scroll_box(height="500px")
+```
+
+Następnie posłużono się funkcją na.approx w celu zastąpienia braków danych wartościami osiągniętymi za pomocą interpolacji liniowej. Kolejny etap stanowiło przekształcenie danych wyznaczając logarytmiczną stopę zwrotu.
+
+$$R_{t} = ln(\frac{P_t}{P_{t-1}})$$
+```{r, echo=FALSE}
+for (i in 2:length(dataset[1,])){
+  dataset[,i]<-na.approx(dataset[,i])  
+  dataset[,i]<-log(dataset[,i]/lag(dataset[,i]))
+}
+
+dataset<-na.omit(dataset)
+rownames(dataset)<-NULL
+kable(dataset ,caption = "Logarytmiczne stopy zwrotu po uprzednim wykonaniu interpolacji liniowej")%>% kable_styling("striped") %>% scroll_box(height="500px")
+```
+
+### Stacjonarność danych
+W celu sprawdzenia stacjonarności szeregów, posłużono się testem ADF.
+
+$H_0$ - Szereg jest niestacjonarny  
+$H_1$ - Szereg jest stacjonarny  
+
+```{r, echo=FALSE, warning=FALSE}
+adf_check<-data.frame(NA)
+for (i in 2:length(dataset[1,])){
+  adf_check[i-1,1]<-adf.test(dataset[,i], alternative = "stationary")$p.value<0.05
+}
+colnames(adf_check)<-"p-value<0.05?"
+row.names(adf_check)<-c("WIG20", "DAX", "SSE Composite", "SMI", "UK100")
+adf_check
+```
+
+Z powyżej tabeli wynika, iż wszystkie wartości p-value uzyskane w teście ADF wynoszą mniej niż ustalony poziom istotności $\alpha = 0.05$. W związku z tym, szeregi są stacjonarne, a więc możliwe jest przeprowadzenie modelowania na wybranych danych.
+
+## Model VAR
+### Ustalenie liczby opóźnień
+Decyzję dotyczącą liczby opóźnień w modelu podjęto na podstawie kryteriów informacyjnych (Akaikego, Hannana-Quinna, Schwarza i FPE) z wykorzystaniem funkcji programu R VARselect. 
+
+```{r pressure, echo=FALSE}
+VARselect(dataset[2:length(dataset[1,])])
+```
+Na podstawie wyników powyższych kryteriów informacyjnych postanowiono wziąć pod uwagę dwa opóźnienia (wskazania AIC i FPE).
+
+### Weryfikacja modelu
+Biorąc pod uwagę wybrane spółki oraz liczbę opóźnień, model przyjmuje postać następującą:
+$$WIG20 = \gamma_{10} +\gamma_{11}WIG20_{t-1}+ \gamma_{12}DAX_{t-1} + \gamma_{13}SSEComp_{t-1}+ \gamma_{14}SMI_{t-1}+ \gamma_{15}UK100_{t-1}+\\ \gamma_{16}WIG20_{t-2}+ \gamma_{17}DAX_{t-2} + \gamma_{18}SSEComp_{t-2}+ \gamma_{19}SMI_{t-2}+ \gamma_{110}UK100_{t-2}$$
+
+$$DAX = \gamma_{20} +\gamma_{21}WIG20_{t-1}+ \gamma_{22}DAX_{t-1} + \gamma_{23}SSEComp_{t-1}+ \gamma_{24}SMI_{t-1}+ \gamma_{25}UK100_{t-1}+\\ \gamma_{26}WIG20_{t-2}+ \gamma_{27}DAX_{t-2} + \gamma_{28}SSEComp_{t-2}+ \gamma_{29}SMI_{t-2}+ \gamma_{210}UK100_{t-2}$$
+
+$$SSEComp = \gamma_{30} +\gamma_{31}WIG20_{t-1}+ \gamma_{32}DAX_{t-1} + \gamma_{33}SSEComp_{t-1}+ \gamma_{34}SMI_{t-1}+ \gamma_{35}UK100_{t-1}+\\ \gamma_{36}WIG20_{t-2}+ \gamma_{37}DAX_{t-2} + \gamma_{38}SSEComp_{t-2}+ \gamma_{39}SMI_{t-2}+ \gamma_{310}UK100_{t-2}$$
+
+$$SMI = \gamma_{40} +\gamma_{41}WIG20_{t-1}+ \gamma_{42}DAX_{t-1} + \gamma_{43}SSEComp_{t-1}+ \gamma_{44}SMI_{t-1}+ \gamma_{45}UK100_{t-1}+\\ \gamma_{46}WIG20_{t-2}+ \gamma_{47}DAX_{t-2} + \gamma_{48}SSEComp_{t-2}+ \gamma_{49}SMI_{t-2}+ \gamma_{410}UK100_{t-2}$$
+
+$$UK100 = \gamma_{50} +\gamma_{51}WIG20_{t-1}+ \gamma_{52}DAX_{t-1} + \gamma_{53}SSEComp_{t-1}+ \gamma_{54}SMI_{t-1}+ \gamma_{55}UK100_{t-1}+\\ \gamma_{56}WIG20_{t-2}+ \gamma_{57}DAX_{t-2} + \gamma_{58}SSEComp_{t-2}+ \gamma_{59}SMI_{t-2}+ \gamma_{510}UK100_{t-2}$$
+
+Wyniki estymacji otrzymanej za pomocą funkcji VAR
+```{r, echo=FALSE}
+model<-VAR(dataset[2:length(dataset[1,])], p=2)
+summary(model)
+```
+Z powyższego wydruku można wyciągnąć następujące wnioski dotyczące parametrów modelu:  
+
+*	W modelach, z wyjątkiem SMI, opóźnienia obu rzędów dla indeksów spółek tych samych krajów są nieistotne.  
+*	WIG20 i SSE Composite wykazują istotność pojedynczej zmiennej, odpowiednio DAX (opóźnienie rzędu 2) i SMI (opóźnienie rzędu 1).  
+*	Zmienne SSE Composite (opóźnienie rzędu 1) i SMI (opóźnienie rzędu 2) są istotne dla modeli dotyczących indeksu niemieckiego, szwajcarskiego i brytyjskiego.  
+*	Wpływ indeksu brytyjskiego (opóźnienie rzędu 2) zauważalny jest jedynie w odwołaniu do indeksu szwajcarskiego.  
+*	W każdym z modeli opóźnienia obu rzędów WIG20 są nieistotne.  
+
+### Testowanie autokorelacji składnika losowego
+$H_0$ - Brak autokorelacji rzędu p  
+$H_1$ - Wystpowanie autokorelacji rzędu p  
+
+Autokorelację zbadano za pomocą funkcji Box.test bazującej na teście Ljunga-Boxa dla opóźnień rzędu 1 i 2.
+
+```{r, echo=FALSE}
+resid_data<-data.frame(model$varresult$WIG20$residuals, model$varresult$DAX$residuals, model$varresult$SPX$residuals, model$varresult$AUT$residuals, model$varresult$FTSE$residuals)
+p_values<-data.frame(NA,NA,NA,NA,NA)
+for (i in 1:(length(dataset[1,])-1)) {
+  p_values[1,i]<-Box.test(resid_data[,i],1,"Ljung-Box")$p.value
+  p_values[2,i]<-Box.test(resid_data[,i],2,"Ljung-Box")$p.value
+}
+colnames(p_values)<-c("WIG20", "DAX", "SPX", "AUT", "FTSE")
+row.names(p_values)<-c("Autocorelation rank 1", "Autocorelation rank 2")
+p_values
+```
+
+Otrzymane poziomy p-value wskazują na brak postaw do odrzucenia hipotezy zerowej dotyczącej braku autokorelacji.
+
+## Przyczynowość w sensie Grangera
+$H_0$ - Zmienna nie jest przyczyną w sensie Grangera  
+$H_1$ - Zmienna jest przyczyną w sensie Grangera  
+
+Przyczynowość w sensie Grangera zbadano za pomocą funkcji causality.
+
+### Wpływ pojedynczego indeksu na wszystkie łącznie
+```{r, echo=FALSE}
+results_Granger1<-data.frame(c(causality(model,"WIG20")$Granger$p.value, causality(model,"DAX")$Granger$p.value, causality(model,"SPX")$Granger$p.value, causality(model,"AUT")$Granger$p.value, causality(model,"FTSE")$Granger$p.value))
+colnames(results_Granger1)<-"Granger p-value"
+rownames(results_Granger1)<-c("WIG20", "DAX", "SPX", "AUT", "FTSE")
+round(results_Granger1,4)
+```
+Wnioski:
+
+* WIG20 i SSE Composite nie wpływają jednocześnie na pozostałe indeksy.  
+* DAX, SMI i UK100 wpływają jednocześnie na pozostałe indeksy.  
+
+### Wpływ pojedynczego indeksu na każdy z osobna
+```{r, echo=FALSE}
+results_Granger2<-data.frame(c(NA,NA,NA,NA,NA),c(NA,NA,NA,NA,NA),c(NA,NA,NA,NA,NA),c(NA,NA,NA,NA,NA),c(NA,NA,NA,NA,NA))
+colnames(results_Granger2)<-c("WIG20","DAX", "SPX", "AUT", "FTSE")
+row.names(results_Granger2)<-c("WIG20","DAX", "SPX", "AUT", "FTSE")
+
+for (i in 1:length(results_Granger2[,1])){
+  for (j in 1:length(results_Granger2[1,])){
+    if(i!=j){
+      results_Granger2[i,j]<-round(grangertest(dataset[,i+1]~dataset[,j+1])$Pr[2],4)
+    }
+    else
+      results_Granger2[i,j]<-" - "
+  }
+}
+results_Granger2
+```
+Wnioski:
+
+* WIG20 i DAX są przyczynami w sensie Grangera tylko dla SSE Composite.  
+* SSE Composite jest przyczyną w sensie Grangera dla DAX, SMI i UK100.  
+* SMI i UK100 są przyczynami w sensie Grangera dla WIG20 i SSE Composite.  
+
+Warto zwrócić uwagę na dwa z wybranych do analizy indeksów: WIG20 i SSE Composite. Z badania istotności zmiennych wynika, iż w przypadku polskiego indeksu giełdowego jedynie DAX możemy uznawać za wpływowy. Podobnie dla indeksu chińskiego za jedyny istotny czynnik można by było mylnie uznać indeks giełdy szwajcarskiej. W tych dwóch przypadkach badanie przyczynowości względem Grangera wskazuje wyraźnie różne zależności. Wynika bowiem, iż dla WIG20 przyczynami są wcześniej potencjalnie nieistotne SMI i UK100, a dla SSE Composite wszystkie indeksy.
+
+## Reakcja na impuls
+Badanie reakcji na impuls przeprowadzono za pomocą funkcji irf obliczającej współczynniki odpowiedzi impulsowej VAR(p). Wyniki zostały przedstawione w formie wykresów:
+
+* dla WIG20 – DAX, SSE Composite, SMI, UK100
+* dla DAX - SSE Composite, SMI, UK100
+* dla SSE Composite - SMI, UK100
+* dla SMI - UK100
+
+### Odpowiedzi na impuls na WIG20
+
+```{r, echo=FALSE, fig.height=12, fig.width=10, fig.align='center'}
+impulse1<-irf(model, impulse="WIG20", response=c("DAX", "SPX", "AUT", "FTSE"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impulse1)
+```
+Na podstawie powyższych wykresów można wywnioskować, iż wpływ nieoczekiwanej zmiany zmiennej WIG20 na poszczególne „odpowiedzi” jest widoczny do ok. 2-3 okresów. Dla SSE Composite zauważono bardziej stabilny spadek wpływu niż w przypadku pozostałych indeksów, gdzie po okresie pierwszym wpływ zmiany jest stanowczo niższy, a po okresie drugim praktycznie niezauważalny.
+
+```{r, echo=FALSE, fig.height=8, fig.width=10, fig.align='center'}
+impulse2<-irf(model, impulse="DAX", response=c("SSE.Composite", "SMI", "UK100"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impulse2)
+```
+
+Powyższe wykresy wskazują, iż SMI i UK100 podobnie reagują na nieoczekiwaną zmianę DAX. Zauważono gwałtowny spadek wpływu na okres pierwszy i praktycznie całkowity zanik po okresie odpowiednio trzecim i czwartym. W przypadku SSE Composite wpływ przestaje być zauważalny tak samo jak w sytuacji SMI, z tym że potem ponownie jest obserwowalny około okresu piątego. Jednakże, w przeciwieństwie do SMI i UK100 zaobserwowano wzrost wpływu nieoczekiwanej zmiany DAX w okresie pierwszym.
+
+```{r, echo=FALSE, fig.height=7, fig.width=10, fig.align='center'}
+impulse3<-irf(model, impulse="SSE.Composite", response=c("SMI", "UK100"), n.ahead=6, ortho=TRUE, runs=100)
+plot(impulse3)
+```
+
+Na podstawie powyższych wykresów można wywnioskować, że w okresie pierwszym w obu przypadkach kierunek odpowiedzi jest przeciwny. Następnie wpływ skoku wielkości pojedynczego odchylenia standardowego wyraźnie spada. Po okresie drugim kierunek odpowiedzi zmienia się. W przypadku UK100 całkowity zanik zmiany SSE Composite następuje w okresie piątym, natomiast dla SMI jest to okres o jeden późniejszy.
+
+```{r, echo=FALSE, fig.height=5, fig.width=10, fig.align='center'}
+impulse4<-irf(model, impulse="SMI", response=c("UK100"), n.ahead=8, ortho=TRUE, runs=100)
+plot(impulse4)
+```
+
+W powyższym przypadku w wpływ przybiera różne kierunki dla okresu pierwszego i drugiego. Kierunku przeciwny utrzymuje się do okresu czwartego przy czym osiąga swój peek w trzecim. Od okresu piątego wpływ stopniowo spada i dąży do zaniku w siódmym.

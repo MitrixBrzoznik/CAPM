@@ -1,0 +1,219 @@
+---
+title: "Model VECM"
+author: "Mikołaj Brzozowski"
+date: "21 01 2021"
+output: html_document
+---
+
+```{r setup, include=TRUE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r libraries, echo=FALSE, message=FALSE}
+library(kableExtra)
+library(zoo)
+library(readxl)
+library(tidyverse)
+library(tseries)
+library(vars)
+library(urca)
+library(tsDyn)
+library(vars)
+```
+
+## Cel projektu
+Celem projektu jest zbadanie długookresowych zależności pomiędzy wybranymi czynnikami za pomocą modelu VECM.
+
+$$\Delta Y_t=\Pi Y_{t-1}+\sum_{i=1}^{p}\Gamma_{i}\Delta Y_{t-i}+u_t$$
+gdzie:
+
+* $Y_t$ - K-wymiarowy proces
+* $\Pi$ - macierz, dla której $rank(\Pi) = r$ oraz $r<K$
+
+## Dane
+### Obróbka danych
+
+Dane zostały pobrane z serwisu finansowego [Stooq](https://stooq.pl/) oraz [OECD](http://www.oecd.org/) od stycznia 2001 do grudnia 2020 (dane miesięczne). Analiza przeprowadzona została na podstawie pięciu następujących zestawach:
+
+* [WIG](https://stooq.pl/q/?s=wig) - kurs zamknięcia WIG
+* [UNEMPL](https://stooq.pl/q/a/?s=unrtpl.m) - stopa bezrobocia
+* [EURPLN](https://stooq.pl/q/a/?s=eurpln) - kurs euro – złoty polski
+* [INFL](https://stooq.pl/q/a/?s=cpiypl.m) - inflacja
+* [LTI](https://data.oecd.org/interest/long-term-interest-rates.htm) - długoterminowe stopy procentowe
+
+
+```{r data}
+setwd("C:/Users/FUJITSU/Desktop/Dokumenty/Studia/IiE 1 MGR - Analiza wielowymiarowa/Proj3")
+data_files<-list.files("C:/Users/FUJITSU/Desktop/Dokumenty/Studia/IiE 1 MGR - Analiza wielowymiarowa/Proj3", pattern = "*.csv")
+data<-sapply(data_files, read.csv, simplify = FALSE)
+data<-lapply(data, function(x) x[names(x)%in%c("Data","Zamkniecie")])
+dataset<-data.frame(data$wig_m.csv)
+colnames(dataset)<-c("Data", "WIG")
+for (i in 1:length(data_files)) {
+  if(data_files[i]!="wig_m.csv")
+    dataset<-merge(dataset, data[[i]], by="Data", all = TRUE)
+}
+colnames(dataset)<-c("Data", "WIG", "INFL", "LTI", "EURPLN", "UNEMPL")
+kable(dataset ,caption = "Pobrane dane")%>% kable_styling("striped") %>% scroll_box(height="500px")
+```
+
+Następnie posłużono się funkcją na.approx w celu zastąpienia braków danych wartościami osiągniętymi za pomocą interpolacji liniowej.
+
+```{r interpolation}
+for (i in 2:length(dataset[1,])){
+  dataset[,i]<-na.approx(dataset[,i])
+}
+```
+
+Na podstawie pobranych danych przygotowano także zestaw przyrostów w celu sprawdzenia stacjonardości danych i I(1).
+```{r increments}
+WIG<-matrix(NA,length(dataset[,1]),1)
+for (i in 2:length(dataset[,1])) {
+  WIG[i]<-(log(dataset[i,2])-log(dataset[i-1,2]))/log(dataset[i-1,2])
+}
+dataset2<-data.frame(data$wig_m.csv$Data, WIG)
+
+for (i in 3:length(dataset[1,])){
+  for(j in 3:length(dataset[,1])){
+    dataset2[j,i]<-dataset[j,i]-dataset[j-1,i]
+  }
+}
+dataset2<-na.omit(dataset2)
+colnames(dataset2)<-c("Data", "WIG", "INFL", "LTI", "EURPLN", "UNEMPL")
+kable(dataset2 ,caption = "Przyrosty")%>% kable_styling("striped") %>% scroll_box(height="500px")
+```
+
+### Stacjonarność danych
+W celu sprawdzenia stacjonarności szeregów, posłużono się testem ADF.
+
+$H_0$ - Szereg jest niestacjonarny  
+$H_1$ - Szereg jest stacjonarny  
+
+```{r ADF}
+adf_check<-data.frame(NA, NA)
+for (i in 2:length(dataset[1,])){
+  adf_check[i-1,1]<-adf.test(dataset[,i], alternative = "stationary")$p.value<0.05
+  adf_check[i-1,2]<-adf.test(dataset2[,i], alternative = "stationary")$p.value<0.05
+}
+colnames(adf_check)<-c("ADF_D1","ADF_D2")
+row.names(adf_check)<-c("WIG", "INFL", "LTI", "EURPLN", "UNEMPL")
+adf_check
+```
+
+Na podstawie powyższej tabeli można wywnioskować, iż jedynie dane dotyczące długoterminowych stóp procentowych można uznać za stacjonarne. Aby stworzyć model VECM należy uprzednio sprawdzić czy przyrosty są stacjonarne, co wiąże się z I(1). Druga kolumna wskazuje, że przyrosty są stacjonarne więc dla wybranych danych możliwe jest zbudowanie modelu VECM.
+
+## VARselect – wyznaczenie opóźnienia do modelu VECM
+Kolejnym etapem do stworzenia modelu VECM jest ustalenie liczby opóźnień. Do tego zostano funkcję VARselect za pomocą, której otrzymano potrzebną informację poprzez uzyskanie liczby opóźnień w modelu VAR. Badanie przeprowadzane jest na danych niestacjonarnych.
+
+```{r VARselect}
+VARselect(dataset[2:length(dataset[1,])])
+```
+Kryteria informacyjne z powyższej tabeli wskazały, że dla modelu VAR opóźnienie 2 lub 3 powinny zostać przyjęte. Na tej podstawie do testu Johansena argument odpowiadający za lag przyjął wartość równą 3.
+
+
+### Testowanie autokorelacji składnika losowego
+$H_0$ - Brak autokorelacji rzędu p  
+$H_1$ - Wystpowanie autokorelacji rzędu p  
+
+Autokorelację zbadano za pomocą funkcji Box.test bazującej na teście Ljunga-Boxa dla opóźnień rzędu 1, 2 i 3.
+
+```{r Ljung-Box}
+model<-VAR(dataset[2:length(dataset[1,])], p=3)
+resid_data<-data.frame(model$varresult$WIG$residuals, model$varresult$INFL$residuals, model$varresult$LTI$residuals, model$varresult$EURPLN$residuals, model$varresult$UNEMPL$residuals)
+p_values<-data.frame(NA,NA,NA,NA,NA)
+for (i in 1:(length(dataset[1,])-1)) {
+  for(j in 1:3)
+  p_values[j,i]<-Box.test(resid_data[,i],j,"Ljung-Box")$p.value
+}
+colnames(p_values)<-c("WIG", "INFL", "LTI", "EURPLN", "UNEMPL")
+row.names(p_values)<-c("Autocorrelation rank 1", "Autocorrelation rank 2", "Autocorrelation rank 3")
+p_values
+```
+Otrzymane poziomy p-value wskazują na brak postaw do odrzucenia hipotezy zerowej dotyczącej braku autokorelacji. Na tej podstawie przyjęto do dalszej analizy opóźnienie VAR równe 3.
+
+## Test Johansena - liczba relacji kointegrujących
+
+$H_0$ - $rank(\Pi)=r_i$  
+$H_1$ - $r_i<rank(\Pi)\le r_j$  
+gdzie:
+
+* $i=${$0,1,...,k-1$}
+* $j=${$1,2,...,k$}
+* $k$ - liczba zmiennych - 1
+
+W przypadku odrzucenia wszystkich hipotez zerowych badane procesy będzie można uznać za stacjonarne gdyż $rank(\Pi)=K$, czyli całkowitej liczbie zmiennych.
+
+Wykonane zostały oba dostępne testy Johansena: test śladu i test największej wartości własnej.
+```{r Johansen}
+test_Johansen<-ca.jo(dataset[2:length(dataset[1,])], type=c("trace"), K=3, ecdet="none", spec="longrun")
+test_Johansen2<-ca.jo(dataset[2:length(dataset[1,])], type=c("eigen"), K=3, ecdet="none", spec="longrun")
+summary(test_Johansen)
+summary(test_Johansen2)
+```
+Powyższe testy wskazują, że najmniejszy r, dla którego statystyka test jest mniejsza od wartości krytycznej dla poziomu istotności 5% wynosi 1. Świadczy to o istnieniu jednej relacji kointegrującej. Wartość ta została wprowadzona do funkcji modelu VECM.
+
+## Model VECM
+### Estymacja modelu
+Estymacja modelu VECM została wykonana za pomocą funkcji VECM. Jako parametry poza zestawem danych przyjęto wcześniej ustaloną wysokość opóźnienia (VAR-1) oraz wynikająca z testów Johansena liczba relacji kointegrujących.
+```{r VECM}
+model<-VECM(dataset[2:length(dataset[1,])], 2, 1, estim = "ML")
+WIG_ECT<-round(model$coefficients[1],4)
+INFL_ECT<-round(model$coefficients[2],7)
+LTI_ECT<-round(model$coefficients[3],7)
+EURPLN_ECT<-round(model$coefficients[4],7)
+UNEMPL_ECT<-round(model$coefficients[5],7)
+summary(model)
+```
+
+### Interpretacja estymowanego modelu
+Z podsumowania modelu można wyciągnąć wnioski dotyczące zależności długo- i krótkookresowych.
+
+W ciągu jednego miesiąca korekta zaburzeń wynosi odpowiednio: 
+
+* dla WIG `r WIG_ECT*100`%
+* dla inflacji `r INFL_ECT*100`%
+* dla długookresowej stopy zwrotu `r LTI_ECT*100`%
+* dla kursu euro - polski złoty `r EURPLN_ECT*100`%
+* dla stopy bezrobocia `r UNEMPL_ECT*100`%
+
+Na podstawie istotności zmiennej ECT modelu VECM, można wywnioskować iż na poziomie $\alpha=0.05$ jedynie zmienna odpowiadająca za poziom bezrobocia nie jest istotna statystycznie. W przypadku przyjęcia poziomu istotności w wysokości $0.01$ możnaby było uznać wszystkie zmienne przyjęte do modelu jako istotne.
+
+Analizując zależności krótkookresowe (dla poziomu istotności $0.05$) można dojść do wniosków, iż:
+
+* Kurs WIG wykazuje zależność tylko względem pojedynczego opóźnienia inflacji
+* Poziom inflacji wykazuje zależność względem wielkości z okresu poprzedniego tej samej zmiennej oraz stopy długookresowej zwrotu
+* Długookresowa stopa zwrotu zależy od pojedynczych opóźnień wszystkich zmiennych poza dotyczącą bezrobocia
+* Kurs euro – polski złoty zależy od własnego pojedynczego opóźnienia oraz drugiego zmiennej odpowiadającej za długookresowe stopy zwrotu
+* Stopa bezrobocia wykazuje zależność względem obu opóźnień samej siebie, pojedynczego WIGu oraz podwójnego długookresowe stopy zwrotu
+
+### Reakcja na impuls
+Badanie reakcji na impuls przeprowadzono za pomocą funkcji irf obliczającej współczynniki odpowiedzi impulsowej. Wyniki zostały przedstawione w formie wykresów:
+
+* dla WIG – INFL, LTI, EURPLN, UNEMPL
+* dla INFL - LTI, EURPLN, UNEMPL
+* dla LTI - EURPLN, UNEMPL
+* dla EURPLN - UNEMPL
+
+```{r, fig.height=12, fig.width=10, fig.align='center'}
+impulse1<-irf(model, impulse="WIG", response=c("INFL", "LTI", "EURPLN", "UNEMPL"), n.ahead=20, ortho=TRUE, runs=100)
+plot(impulse1)
+```
+```{r, fig.height=8, fig.width=10, fig.align='center'}
+impulse2<-irf(model, impulse="INFL", response=c("LTI", "EURPLN", "UNEMPL"), n.ahead=20, ortho=TRUE, runs=100)
+plot(impulse2)
+```
+
+```{r, fig.height=8, fig.width=15, fig.align='center'}
+impulse3<-irf(model, impulse="LTI", response=c("EURPLN", "UNEMPL"), n.ahead=20, ortho=TRUE, runs=100)
+plot(impulse3)
+```
+
+```{r, fig.height=6, fig.width=15, fig.align='center'}
+impulse4<-irf(model, impulse="EURPLN", response=c("UNEMPL"), n.ahead=20, ortho=TRUE, runs=100)
+plot(impulse4)
+```
+
